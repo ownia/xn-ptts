@@ -1,6 +1,6 @@
 // Speak a line of text into a WAV file through the C interface, ../include/ptts.h.
 //
-//     speak [--quant auto|q8|q4k|q4|f32] [--rtf] MODEL LANG TEXT OUT.wav
+//     speak [--quant auto|q8|q4k|q4|f32] [--quantize-mimi] [--rtf] MODEL LANG TEXT OUT.wav
 //           [VOICE [TEMPERATURE [SEED]]]
 //
 // MODEL is a checkpoint folder, or on Apple platforms a Core ML bundle. ../README.md shows how to
@@ -57,7 +57,7 @@ static void print_names(const char *names) {
 
 static void usage(const char *program) {
     fprintf(stderr,
-            "usage: %s [--quant auto|q8|q4k|q4|f32] [--rtf] MODEL LANG TEXT OUT.wav "
+            "usage: %s [--quant auto|q8|q4k|q4|f32] [--quantize-mimi] [--rtf] MODEL LANG TEXT OUT.wav "
             "[VOICE [TEMPERATURE [SEED]]]\n", program);
 }
 
@@ -65,6 +65,7 @@ int main(int argc, char **argv) {
     const char *positionals[7];
     size_t positional_count = 0;
     const char *quantization = "auto";
+    bool quantize_mimi = false;
     bool show_rtf = false;
     bool parse_options = true;
     for (int argument_index = 1; argument_index < argc; argument_index++) {
@@ -73,6 +74,8 @@ int main(int argc, char **argv) {
             parse_options = false;
         } else if (parse_options && strcmp(argument, "--rtf") == 0) {
             show_rtf = true;
+        } else if (parse_options && strcmp(argument, "--quantize-mimi") == 0) {
+            quantize_mimi = true;
         } else if (parse_options && strcmp(argument, "--quant") == 0) {
             if (++argument_index == argc) {
                 fprintf(stderr, "--quant requires auto, q8, q4k (or q4), or f32\n");
@@ -112,7 +115,7 @@ int main(int argc, char **argv) {
     uint32_t unit = PTTS_UNIT_CPU;  // the only unit elsewhere
 #endif
     // The slow call. An app loads once and keeps the handle.
-    PttsHandle *h = ptts_new_with_quant(model, unit, lang, quantization);
+    PttsHandle *h = ptts_new_with_options(model, unit, lang, quantization, quantize_mimi);
     if (!h) {
         fprintf(stderr, "cannot load %s: %s\n", model, ptts_last_error(NULL));
         return 1;

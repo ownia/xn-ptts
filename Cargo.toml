@@ -9,6 +9,7 @@ members = [
   "ptts-ws-server",
 ]
 resolver = "3"
+exclude = ["xn"]
 
 [workspace.package]
 version = "0.7.1"
@@ -53,6 +54,9 @@ uuid = { version = "1", features = ["v4"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 xn = "0.2.14"
+
+[patch.crates-io]
+xn = { git = "https://github.com/ownia/xn.git", branch = "feat/arm64_optimize" }
 
 # `release` stays lean: it is what the wheels, the xcframework and `cargo install --path` ship.
 # For a profiler, build with `--profile profiling`, which is release plus debug info.

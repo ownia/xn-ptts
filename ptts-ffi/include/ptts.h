@@ -39,6 +39,12 @@ PttsHandle *ptts_new(const char *dir, uint32_t unit, const char *lang);
 /// ptts_last_error(NULL), on the same thread, reports why. Strings must be NUL-terminated UTF-8.
 PttsHandle *ptts_new_with_quant(const char *dir, uint32_t unit, const char *lang,
                               const char *quantization);
+/// Like ptts_new_with_quant, with optional Mimi q8_0 quantization on the CPU at load time.
+/// Quantizes the decoder transformer, first SEANet conv and first upsampling; later convs stay
+/// f32. Audio values change. false keeps Mimi f32. Apple accepts only auto and false.
+/// NULL on failure; ptts_last_error(NULL), on the same thread, reports why.
+PttsHandle *ptts_new_with_options(const char *dir, uint32_t unit, const char *lang,
+                                const char *quantization, bool quantize_mimi);
 bool ptts_speak(PttsHandle *h, const char *text, PttsFrameFn cb, void *user, PttsResult *out);
 /// NUL-separated voice names, ending in a second NUL. Borrowed.
 const char *ptts_voices(const PttsHandle *h);

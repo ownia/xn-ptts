@@ -95,12 +95,13 @@ writable.
 
 ## 3. The interface
 
-[`ptts.h`](include/ptts.h) has eleven calls:
+[`ptts.h`](include/ptts.h) has twelve calls:
 
 | Call | What it does |
 |---|---|
 | `ptts_new(dir, unit, lang)` | Load the model folder. This is the slow call. |
 | `ptts_new_with_quant(dir, unit, lang, quantization)` | Load with `auto`, `q8`, `q4k` (or `q4`), or `f32`. Explicit choices require that weight file; only `auto` works on Apple. |
+| `ptts_new_with_options(dir, unit, lang, quantization, quantize_mimi)` | The same weight selection, with optional Mimi q8 on the CPU. `false` keeps Mimi f32; Apple accepts only `auto` and `false`. |
 | `ptts_voices(h)` | The voice names, as one block of NUL-separated strings. |
 | `ptts_set_voice(h, name)` | Speak in one of them from now on. |
 | `ptts_languages(h)` | The languages the model was trained for, in the same format. |
@@ -122,8 +123,8 @@ Every binding follows the same rules:
 - **`lang` is required.** `en`, `fr`, `de`, `es` and `pt` normalize numbers and symbols for that
   language, `ar`, `hi`, `ko`, `pl`, `sv`, `fi`, `no`, `it`, `nl`, `ja`, `zh`, `da` and `tr`
   symbols only, and `none` reads the text as written.
-- **Errors.** `ptts_new` and `ptts_new_with_quant` return `NULL` on failure; pass `NULL` to
-  `ptts_last_error` for the load error. `ptts_speak`, `ptts_set_voice`, `ptts_set_language` and
+- **Errors.** The model constructors return `NULL` on failure; pass `NULL` to `ptts_last_error`
+  for the load error. `ptts_speak`, `ptts_set_voice`, `ptts_set_language` and
   `ptts_set_temperature` return `false` on failure; then `ptts_last_error(h)` says why.
 - **Strings from the library are borrowed.** Those from `ptts_voices`, `ptts_languages` and
   `ptts_last_error` belong to the library: copy them if you keep them.
@@ -174,6 +175,45 @@ To select q4k weights and report real-time factor (RTF):
 keeps the existing q8-to-f32 fallback and does not select q4k. Options can appear before or
 after the positional arguments; `--` ends option parsing.
 
+To enable the existing partial Mimi q8 quantization:
+
+```sh
+./speak --quant q4 --quantize-mimi --rtf phonon-40m-multilingual en "Hello from Phonon." speech.wav
+```
+
+`--quantize-mimi` is off by default and works with any CPU `--quant` selection. It quantizes
+the Mimi decoder transformer, first SEANet convolution and first SEANet upsampling to q8_0
+in memory at load time; later convolutions remain f32. It does not change the checkpoint
+files or the Flow LM weight selection. Audio values change, so check quality on your target
+voices and text. It can be slower on some CPUs. Conversion is part of model loading and is
+excluded from the reported synthesis time and RTF. Core ML bundles do not support this option.
+Existing `ptts_new` and `ptts_new_with_quant` calls keep Mimi f32. C callers opt in with:
+
+```c
+PttsHandle *h = ptts_new_with_options(model_dir, PTTS_UNIT_CPU, "en", "q4k", true);
+```
+
+This checkout uses the `feat/arm64_optimize` branch of the [ownia/xn fork](https://github.com/ownia/xn).
+On AArch64 with NEON and `dotprod`, eligible Q4K linear weights are packed into four-column groups at model load. Decode uses
+1x4 tiles and prefill uses 4x4 tiles, sharing activation loads across output columns. The
+weight storage size and canonical GGUF bytes are unchanged. Small or unsupported shapes
+keep the existing kernels. Packing happens during model loading, outside the synthesis
+timings below.
+
+On builds with `i8mm`, Q4K prefill uses `SMMLA` 2x2 microkernels for pairs of activation
+rows. Four-row tiles and two-row tails use I8MM; single-row decode keeps the packed `SDOT`
+kernel. Set `XN_Q4K_I8MM=0` to compare with the previous packed `SDOT` prefill path. The
+weight layout, activation quantization and floating-point accumulation order are unchanged.
+Builds without `i8mm` always use the existing path.
+
+Set `XN_Q4K_REPACK=0` to disable column packing and use the previous four-row prefill
+driver. `XN_Q4K_REPACK=1` forces packing of all eligible shapes for diagnostics, including
+small matrices. To disable both optimizations and use the original Q4K driver:
+
+```sh
+XN_Q4K_REPACK=0 XN_Q4K_TILED=0 ./speak --quant q4 --rtf phonon-40m-multilingual en "Hello from Phonon." speech.wav
+```
+
 `--rtf` reports `(total_ms / 1000) / (samples / 24000)`, with synthesis time, time to first
 audio (TTFA), frame count and sample count. RTF below 1 means faster than real time. It uses
 the existing `PttsResult` timings: normalization, generation and WAV-writing callbacks are
@@ -190,8 +230,8 @@ Load the library with your language's usual way of calling C, and declare the ca
 `ptts.h`. In Flutter that is `dart:ffi`; in C#, `[DllImport("ptts_ffi")]`; in Unity, a native
 plugin; in Go, cgo. Three details matter in any language:
 
-- `ptts_speak`, `ptts_set_voice`, `ptts_set_language`, `ptts_set_temperature` and the callback
-  use a C `bool`, which is one byte. JNA's `Boolean` and C#'s default `bool` are four bytes, and
+- `ptts_new_with_options`'s `quantize_mimi` parameter, the boolean return values and the
+  callback use a C `bool`, which is one byte. JNA's `Boolean` and C#'s default `bool` are four bytes, and
   misread it. `ptts_set_seed` takes a 64-bit unsigned integer.
 - `size_t`, in `PttsResult` and the callback, is the size of a pointer. Map it to an unsigned
   pointer-sized integer, not a 32-bit one.

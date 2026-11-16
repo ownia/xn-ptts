@@ -5,8 +5,8 @@
 //! driver, and `dir` is a bundle `export_coreml` wrote. Everywhere else, `cpu` runs
 //! `ptts::synth::Synth` on the CPU, and `dir` is a checkpoint folder.
 //!
-//! `ptts_new` or `ptts_new_with_quant` loads the model; it is the expensive call. `ptts_speak`
-//! may then be called repeatedly, streaming the audio to a callback as it is decoded.
+//! A model constructor loads the model; it is the expensive call. `ptts_speak` may then be
+//! called repeatedly, streaming the audio to a callback as it is decoded.
 //!
 //! Only the platform glue lives here. `include/ptts.h` declares this interface by hand, so any
 //! change to a signature or to `PttsResult` has to be made there too.
@@ -89,16 +89,25 @@ fn nul_separated(names: &[String]) -> Vec<u8> {
     blob
 }
 
-fn open(dir: &Path, unit: u32, lang: &str, quantization: &str) -> Result<PttsHandle, String> {
-    let engine = match quantization {
-        "auto" => Engine::open(dir, unit, lang)?,
+fn open(
+    dir: &Path,
+    unit: u32,
+    lang: &str,
+    quantization: &str,
+    quantize_mimi: bool,
+) -> Result<PttsHandle, String> {
+    let engine = match (quantization, quantize_mimi) {
+        ("auto", false) => Engine::open(dir, unit, lang)?,
         _ => {
             #[cfg(target_vendor = "apple")]
-            return Err(
-                "explicit weight quantization is unavailable for Core ML bundles; use auto".into(),
-            );
+            return Err(if quantize_mimi {
+                "Mimi quantization is unavailable for Core ML bundles"
+            } else {
+                "explicit weight quantization is unavailable for Core ML bundles; use auto"
+            }
+            .into());
             #[cfg(not(target_vendor = "apple"))]
-            Engine::open_with_quant(dir, unit, lang, quantization)?
+            Engine::open_with_options(dir, unit, lang, quantization, quantize_mimi)?
         }
     };
     let voice_blob = nul_separated(engine.voices());
@@ -140,10 +149,29 @@ pub unsafe extern "C" fn ptts_new_with_quant(
     lang: *const c_char,
     quantization: *const c_char,
 ) -> *mut PttsHandle {
+    unsafe { ptts_new_with_options(dir, unit, lang, quantization, false) }
+}
+
+/// Like [`ptts_new_with_quant`], with optional Mimi q8_0 quantization on the CPU.
+/// `quantize_mimi` quantizes the decoder transformer, first SEANet convolution and first
+/// SEANet upsampling at load time. Later convolutions remain f32. This changes audio values;
+/// false preserves the existing f32 decoder. Apple bundles accept only `auto` and false.
+/// Null on failure; then [`ptts_last_error`] with a null handle reports why.
+///
+/// # Safety
+/// `dir`, `lang` and `quantization` must be NUL-terminated UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ptts_new_with_options(
+    dir: *const c_char,
+    unit: u32,
+    lang: *const c_char,
+    quantization: *const c_char,
+    quantize_mimi: bool,
+) -> *mut PttsHandle {
     let dir = unsafe { CStr::from_ptr(dir) }.to_string_lossy().to_string();
     let lang = unsafe { CStr::from_ptr(lang) }.to_string_lossy().to_string();
     let quantization = unsafe { CStr::from_ptr(quantization) }.to_string_lossy().to_string();
-    match guarded(|| open(Path::new(&dir), unit, &lang, &quantization)) {
+    match guarded(|| open(Path::new(&dir), unit, &lang, &quantization, quantize_mimi)) {
         Ok(h) => Box::into_raw(Box::new(h)),
         Err(e) => {
             LAST_ERROR.with(|l| *l.borrow_mut() = Some(c_string(&e)));

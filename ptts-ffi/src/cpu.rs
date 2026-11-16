@@ -60,14 +60,15 @@ pub struct Engine {
 
 impl Engine {
     pub fn open(dir: &Path, unit: u32, lang: &str) -> Result<Self, String> {
-        Self::open_with_quant(dir, unit, lang, "auto")
+        Self::open_with_options(dir, unit, lang, "auto", false)
     }
 
-    pub fn open_with_quant(
+    pub fn open_with_options(
         dir: &Path,
         unit: u32,
         lang: &str,
         quantization: &str,
+        quantize_mimi: bool,
     ) -> Result<Self, String> {
         if unit != PTTS_UNIT_CPU {
             return Err(format!("compute unit {unit} is Apple only; use PTTS_UNIT_CPU"));
@@ -80,7 +81,8 @@ impl Engine {
         let mut builder = SynthBuilder::new(cfg, weights, Normalize::OFF)
             .tokenizer_file(dir.join("tokenizer.json"))
             .device(DeviceKind::Cpu)
-            .quant(quant);
+            .quant(quant)
+            .quantize_mimi(quantize_mimi);
         for (name, path) in ptts::loader::checkpoint_voices(dir) {
             builder = builder.add_voice(name, path);
         }

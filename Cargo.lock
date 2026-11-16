@@ -5621,8 +5621,7 @@ checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 [[package]]
 name = "xn"
 version = "0.2.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "940d8e12d2ab81c93ca7a19d236329dcc4df0782fcaeb0891c188077e43f6e0f"
+source = "git+https://github.com/ownia/xn.git?branch=feat%2Farm64_optimize#f0f18e8f9ee1b25770a2bb6255b38560c43cdf53"
 dependencies = [
  "ash",
  "bindgen_cuda",
