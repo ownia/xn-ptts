@@ -1,6 +1,7 @@
 // Speak a line of text into a WAV file through the C interface, ../include/ptts.h.
 //
-//     speak MODEL LANG TEXT OUT.wav [VOICE [TEMPERATURE [SEED]]]
+//     speak [--quant auto|q8|q4k|q4|f32] [--rtf] MODEL LANG TEXT OUT.wav
+//           [VOICE [TEMPERATURE [SEED]]]
 //
 // MODEL is a checkpoint folder, or on Apple platforms a Core ML bundle. ../README.md shows how to
 // build the library and this program. A TEMPERATURE or SEED other than the model's gives another
@@ -54,13 +55,56 @@ static void print_names(const char *names) {
     for (const char *n = names; *n; n += strlen(n) + 1) fprintf(stderr, "  %s\n", n);
 }
 
+static void usage(const char *program) {
+    fprintf(stderr,
+            "usage: %s [--quant auto|q8|q4k|q4|f32] [--rtf] MODEL LANG TEXT OUT.wav "
+            "[VOICE [TEMPERATURE [SEED]]]\n", program);
+}
+
 int main(int argc, char **argv) {
-    if (argc < 5 || argc > 8) {
-        fprintf(stderr, "usage: %s MODEL LANG TEXT OUT.wav [VOICE [TEMPERATURE [SEED]]]\n",
-                argv[0]);
+    const char *positionals[7];
+    size_t positional_count = 0;
+    const char *quantization = "auto";
+    bool show_rtf = false;
+    bool parse_options = true;
+    for (int argument_index = 1; argument_index < argc; argument_index++) {
+        const char *argument = argv[argument_index];
+        if (parse_options && strcmp(argument, "--") == 0) {
+            parse_options = false;
+        } else if (parse_options && strcmp(argument, "--rtf") == 0) {
+            show_rtf = true;
+        } else if (parse_options && strcmp(argument, "--quant") == 0) {
+            if (++argument_index == argc) {
+                fprintf(stderr, "--quant requires auto, q8, q4k (or q4), or f32\n");
+                return 2;
+            }
+            quantization = argv[argument_index];
+            if (strcmp(quantization, "auto") && strcmp(quantization, "q8") &&
+                strcmp(quantization, "q8_0") && strcmp(quantization, "q4") &&
+                strcmp(quantization, "q4k") && strcmp(quantization, "f32")) {
+                fprintf(stderr, "unsupported quantization %s\n", quantization);
+                return 2;
+            }
+        } else if (parse_options && strcmp(argument, "--help") == 0) {
+            usage(argv[0]);
+            return 0;
+        } else if (parse_options && strncmp(argument, "--", 2) == 0) {
+            fprintf(stderr, "unknown option %s\n", argument);
+            return 2;
+        } else {
+            if (positional_count == sizeof positionals / sizeof positionals[0]) {
+                usage(argv[0]);
+                return 2;
+            }
+            positionals[positional_count++] = argument;
+        }
+    }
+    if (positional_count < 4) {
+        usage(argv[0]);
         return 2;
     }
-    const char *model = argv[1], *lang = argv[2], *text = argv[3], *path = argv[4];
+    const char *model = positionals[0], *lang = positionals[1];
+    const char *text = positionals[2], *path = positionals[3];
 
 #ifdef __APPLE__
     uint32_t unit = PTTS_UNIT_ANE;  // the Neural Engine
@@ -68,31 +112,31 @@ int main(int argc, char **argv) {
     uint32_t unit = PTTS_UNIT_CPU;  // the only unit elsewhere
 #endif
     // The slow call. An app loads once and keeps the handle.
-    PttsHandle *h = ptts_new(model, unit, lang);
+    PttsHandle *h = ptts_new_with_quant(model, unit, lang, quantization);
     if (!h) {
         fprintf(stderr, "cannot load %s: %s\n", model, ptts_last_error(NULL));
         return 1;
     }
-    if (argc >= 6 && !ptts_set_voice(h, argv[5])) {
+    if (positional_count >= 5 && !ptts_set_voice(h, positionals[4])) {
         fprintf(stderr, "%s. The voices are:\n", ptts_last_error(h));
         print_names(ptts_voices(h));
         ptts_free(h);
         return 1;
     }
     char *end;
-    if (argc >= 7) {
-        float temperature = strtof(argv[6], &end);
-        if (end == argv[6] || *end || !ptts_set_temperature(h, temperature)) {
-            fprintf(stderr, "bad temperature %s\n", argv[6]);
+    if (positional_count >= 6) {
+        float temperature = strtof(positionals[5], &end);
+        if (end == positionals[5] || *end || !ptts_set_temperature(h, temperature)) {
+            fprintf(stderr, "bad temperature %s\n", positionals[5]);
             ptts_free(h);
             return 1;
         }
     }
-    if (argc == 8) {
-        unsigned long long seed = strtoull(argv[7], &end, 10);
+    if (positional_count == 7) {
+        unsigned long long seed = strtoull(positionals[6], &end, 10);
         // strtoull reads "-1" as the largest seed rather than refusing it.
-        if (end == argv[7] || *end || argv[7][0] == '-') {
-            fprintf(stderr, "bad seed %s\n", argv[7]);
+        if (end == positionals[6] || *end || positionals[6][0] == '-') {
+            fprintf(stderr, "bad seed %s\n", positionals[6]);
             ptts_free(h);
             return 1;
         }
@@ -127,7 +171,19 @@ int main(int argc, char **argv) {
         perror(path);
         ok = false;
     }
-    if (ok) printf("%s: %.1f s of audio\n", path, (double)result.samples / SAMPLE_RATE);
+    if (ok) {
+        double audio_seconds = (double)result.samples / SAMPLE_RATE;
+        printf("%s: %.1f s of audio\n", path, audio_seconds);
+        if (show_rtf) {
+            if (result.samples) {
+                printf("RTF: %.3f", result.total_ms / (audio_seconds * 1000.0));
+            } else {
+                printf("RTF: n/a");
+            }
+            printf(" (%.1f ms synthesis, %.1f ms TTFA, %u frames, %zu samples)\n",
+                   result.total_ms, result.ttfa_ms, result.frames, result.samples);
+        }
+    }
     ptts_free(h);
     return ok ? 0 : 1;
 }

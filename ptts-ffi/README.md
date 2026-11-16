@@ -68,7 +68,9 @@ repo is:
 |---|---|
 | `config.json` | Required. The checkpoint's own model configuration; there is no fallback config. |
 | `tokenizer.json` | The checkpoint's tokenizer. |
-| `model.q8.gguf` or `model.safetensors` | The weights: q8_0 GGUF, or f32 safetensors. GGUF is used when both are there. |
+| `model.q8.gguf` | q8_0 weights. Used by default when present. |
+| `model.safetensors` | f32 weights. The default fallback when q8 is absent. |
+| `model.q4k.gguf` | Optional q4k weights. Select explicitly with `ptts_new_with_quant(..., "q4k")`. |
 | `voices/<name>.safetensors` or `embeddings/<name>.safetensors` | The voices, each named after its file. |
 | `default-voice.safetensors` | Optional. Listed as the voice `default`, and spoken when no voice is set. |
 
@@ -93,11 +95,12 @@ writable.
 
 ## 3. The interface
 
-[`ptts.h`](include/ptts.h) has ten calls:
+[`ptts.h`](include/ptts.h) has eleven calls:
 
 | Call | What it does |
 |---|---|
 | `ptts_new(dir, unit, lang)` | Load the model folder. This is the slow call. |
+| `ptts_new_with_quant(dir, unit, lang, quantization)` | Load with `auto`, `q8`, `q4k` (or `q4`), or `f32`. Explicit choices require that weight file; only `auto` works on Apple. |
 | `ptts_voices(h)` | The voice names, as one block of NUL-separated strings. |
 | `ptts_set_voice(h, name)` | Speak in one of them from now on. |
 | `ptts_languages(h)` | The languages the model was trained for, in the same format. |
@@ -119,8 +122,9 @@ Every binding follows the same rules:
 - **`lang` is required.** `en`, `fr`, `de`, `es` and `pt` normalize numbers and symbols for that
   language, `ar`, `hi`, `ko`, `pl`, `sv`, `fi`, `no`, `it`, `nl`, `ja`, `zh`, `da` and `tr`
   symbols only, and `none` reads the text as written.
-- **Errors.** `ptts_new` returns `NULL` on failure, and `ptts_speak`, `ptts_set_voice`,
-  `ptts_set_language` and `ptts_set_temperature` return `false`. Then `ptts_last_error` says why.
+- **Errors.** `ptts_new` and `ptts_new_with_quant` return `NULL` on failure; pass `NULL` to
+  `ptts_last_error` for the load error. `ptts_speak`, `ptts_set_voice`, `ptts_set_language` and
+  `ptts_set_temperature` return `false` on failure; then `ptts_last_error(h)` says why.
 - **Strings from the library are borrowed.** Those from `ptts_voices`, `ptts_languages` and
   `ptts_last_error` belong to the library: copy them if you keep them.
 - **Set the thread count** of the CPU engine with the `RAYON_NUM_THREADS` environment variable,
@@ -159,8 +163,26 @@ cc ptts-ffi/examples/speak.c -I ptts-ffi/include -L target/release -lptts_ffi \
 ./speak phonon-31m-en en "Hello from Phonon." speech.wav
 ```
 
+To select q4k weights and report real-time factor (RTF):
+
+```sh
+./speak --quant q4k --rtf phonon-40m-multilingual en "Hello from Phonon." speech.wav
+```
+
+`--quant q4` is an alias for `q4k`; both require `model.q4k.gguf`. `--quant q8` requires
+`model.q8.gguf`, and `--quant f32` requires `model.safetensors`. The default, `--quant auto`,
+keeps the existing q8-to-f32 fallback and does not select q4k. Options can appear before or
+after the positional arguments; `--` ends option parsing.
+
+`--rtf` reports `(total_ms / 1000) / (samples / 24000)`, with synthesis time, time to first
+audio (TTFA), frame count and sample count. RTF below 1 means faster than real time. It uses
+the existing `PttsResult` timings: normalization, generation and WAV-writing callbacks are
+included; model loading, final WAV header updates and file closing are not. Empty audio
+reports `RTF: n/a`. Without `--rtf`, the output is unchanged.
+
 On macOS, pass the Core ML bundle instead of the checkpoint folder. On Windows, link
-`ptts_ffi.dll.lib` and put `ptts_ffi.dll` beside the program.
+`ptts_ffi.dll.lib` and put `ptts_ffi.dll` beside the program. Core ML bundles fix their weights
+at export time, so only `--quant auto` is accepted on Apple; `--rtf` works on both engines.
 
 ## Other languages
 

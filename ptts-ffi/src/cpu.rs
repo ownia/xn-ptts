@@ -1,7 +1,7 @@
 //! The engine everywhere but Apple: [`ptts::synth::Synth`] on the CPU, with `dir` a checkpoint
 //! folder as the other frontends read it.
 //!
-//! The folder holds `tokenizer.json`, the weights (q8_0 GGUF or f32 safetensors, named as in
+//! The folder holds `tokenizer.json`, the weights (q8_0 or q4k GGUF, or f32 safetensors, named as in
 //! [`WEIGHTS`]), its own `config.json` and its voices
 //! in `voices/` or `embeddings/`, or as `default-voice.safetensors`.
 
@@ -9,11 +9,39 @@ use crate::{PTTS_UNIT_CPU, PttsResult};
 use ptts::checkpoint::read_config;
 use ptts::preprocess::Normalize;
 use ptts::synth::{DeviceKind, Quant, SpeechOptions, Synth, SynthBuilder};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-/// Weight files tried in order, with the format each loads as.
-const WEIGHTS: [(&str, Quant); 2] =
-    [("model.q8.gguf", Quant::Q80), ("model.safetensors", Quant::F32)];
+/// Supported weight files. Automatic selection keeps the original q8-to-f32 order.
+const WEIGHTS: [(&str, Quant); 3] = [
+    ("model.q8.gguf", Quant::Q80),
+    ("model.safetensors", Quant::F32),
+    ("model.q4k.gguf", Quant::Q4k),
+];
+
+fn select_weights(dir: &Path, quantization: &str) -> Result<(PathBuf, Quant), String> {
+    let candidates = match quantization {
+        "auto" => &WEIGHTS[..2],
+        "q8" | "q8_0" => &WEIGHTS[..1],
+        "f32" => &WEIGHTS[1..2],
+        "q4" | "q4k" => &WEIGHTS[2..],
+        _ => {
+            return Err(format!(
+                "unsupported quantization {quantization:?}; expected auto, q8, q4k (or q4), or f32"
+            ));
+        }
+    };
+    candidates
+        .iter()
+        .map(|&(name, quant)| (dir.join(name), quant))
+        .find(|(path, _)| path.is_file())
+        .ok_or_else(|| {
+            format!(
+                "no weights in {}; expected one of {}",
+                dir.display(),
+                candidates.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", ")
+            )
+        })
+}
 
 pub struct Engine {
     synth: Synth,
@@ -32,20 +60,22 @@ pub struct Engine {
 
 impl Engine {
     pub fn open(dir: &Path, unit: u32, lang: &str) -> Result<Self, String> {
+        Self::open_with_quant(dir, unit, lang, "auto")
+    }
+
+    pub fn open_with_quant(
+        dir: &Path,
+        unit: u32,
+        lang: &str,
+        quantization: &str,
+    ) -> Result<Self, String> {
         if unit != PTTS_UNIT_CPU {
             return Err(format!("compute unit {unit} is Apple only; use PTTS_UNIT_CPU"));
         }
         let normalize = lang.parse::<Normalize>().map_err(|e| e.to_string())?;
         let config = dir.join("config.json");
         let cfg = read_config(&config).map_err(|e| e.to_string())?;
-        let (weights, quant) =
-            WEIGHTS.iter().map(|&(name, q)| (dir.join(name), q)).find(|(p, _)| p.is_file()).ok_or(
-                format!(
-                    "no weights in {}; expected one of {}",
-                    dir.display(),
-                    WEIGHTS.map(|(name, _)| name).join(", ")
-                ),
-            )?;
+        let (weights, quant) = select_weights(dir, quantization)?;
         let frame_rate = cfg.mimi.frame_rate;
         let mut builder = SynthBuilder::new(cfg, weights, Normalize::OFF)
             .tokenizer_file(dir.join("tokenizer.json"))

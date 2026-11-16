@@ -33,6 +33,12 @@ typedef bool (*PttsFrameFn)(const float *pcm, size_t n, void *user);
 /// to load; a checkpoint folder without voices loads, lists none, and speaks in no particular
 /// voice.
 PttsHandle *ptts_new(const char *dir, uint32_t unit, const char *lang);
+/// Like ptts_new, with an explicit CPU weight selection: auto keeps the q8-to-f32 fallback,
+/// q8 (q8_0) loads model.q8.gguf, q4k (q4) loads model.q4k.gguf, and f32 loads model.safetensors.
+/// An explicit selection never falls back. On Apple, only auto is accepted. NULL on failure;
+/// ptts_last_error(NULL), on the same thread, reports why. Strings must be NUL-terminated UTF-8.
+PttsHandle *ptts_new_with_quant(const char *dir, uint32_t unit, const char *lang,
+                              const char *quantization);
 bool ptts_speak(PttsHandle *h, const char *text, PttsFrameFn cb, void *user, PttsResult *out);
 /// NUL-separated voice names, ending in a second NUL. Borrowed.
 const char *ptts_voices(const PttsHandle *h);
@@ -47,7 +53,7 @@ bool ptts_set_temperature(PttsHandle *h, float temperature);
 /// Seed the sampling from every ptts_speak on until it is set again: on the same device and model,
 /// the same seed gives the same audio, another seed another take of the same text.
 void ptts_set_seed(PttsHandle *h, uint64_t seed);
-/// The last error on `h`, or the last ptts_new failure on this thread when `h` is NULL.
+/// The last error on `h`, or the last model-constructor failure on this thread when `h` is NULL.
 const char *ptts_last_error(const PttsHandle *h);
 void ptts_free(PttsHandle *h);
 

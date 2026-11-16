@@ -5,8 +5,8 @@
 //! driver, and `dir` is a bundle `export_coreml` wrote. Everywhere else, `cpu` runs
 //! `ptts::synth::Synth` on the CPU, and `dir` is a checkpoint folder.
 //!
-//! `ptts_new` loads the model; it is the expensive call. `ptts_speak` may then be called
-//! repeatedly, streaming the audio to a callback as it is decoded.
+//! `ptts_new` or `ptts_new_with_quant` loads the model; it is the expensive call. `ptts_speak`
+//! may then be called repeatedly, streaming the audio to a callback as it is decoded.
 //!
 //! Only the platform glue lives here. `include/ptts.h` declares this interface by hand, so any
 //! change to a signature or to `PttsResult` has to be made there too.
@@ -39,6 +39,7 @@ pub struct PttsHandle {
 }
 
 /// One utterance's timings. The audio itself went to the callback.
+/// `total_ms` includes synthesis and callbacks, but not model loading.
 #[repr(C)]
 pub struct PttsResult {
     pub frames: u32,
@@ -55,8 +56,8 @@ pub struct PttsResult {
 pub type PttsFrameFn = extern "C" fn(*const f32, usize, *mut c_void) -> bool;
 
 thread_local! {
-    /// The last `ptts_new` failure on this thread. Thread-local, so a failure elsewhere cannot
-    /// free the string a caller is still reading.
+    /// The last model-constructor failure on this thread. Thread-local, so a failure elsewhere
+    /// cannot free the string a caller is still reading.
     // Clippy asks for a `const` initializer on Android, where it already is one.
     #[cfg_attr(target_os = "android", allow(clippy::missing_const_for_thread_local))]
     static LAST_ERROR: RefCell<Option<CString>> = const { RefCell::new(None) };
@@ -88,8 +89,18 @@ fn nul_separated(names: &[String]) -> Vec<u8> {
     blob
 }
 
-fn open(dir: &Path, unit: u32, lang: &str) -> Result<PttsHandle, String> {
-    let engine = Engine::open(dir, unit, lang)?;
+fn open(dir: &Path, unit: u32, lang: &str, quantization: &str) -> Result<PttsHandle, String> {
+    let engine = match quantization {
+        "auto" => Engine::open(dir, unit, lang)?,
+        _ => {
+            #[cfg(target_vendor = "apple")]
+            return Err(
+                "explicit weight quantization is unavailable for Core ML bundles; use auto".into(),
+            );
+            #[cfg(not(target_vendor = "apple"))]
+            Engine::open_with_quant(dir, unit, lang, quantization)?
+        }
+    };
     let voice_blob = nul_separated(engine.voices());
     let language_blob = nul_separated(engine.languages());
     Ok(PttsHandle { engine, voice_blob, language_blob, last_error: None })
@@ -111,9 +122,28 @@ pub unsafe extern "C" fn ptts_new(
     unit: u32,
     lang: *const c_char,
 ) -> *mut PttsHandle {
+    unsafe { ptts_new_with_quant(dir, unit, lang, c"auto".as_ptr()) }
+}
+
+/// Like [`ptts_new`], with an explicit CPU weight selection: `auto` keeps the q8-to-f32
+/// fallback, `q8` (`q8_0`) loads `model.q8.gguf`, `q4k` (`q4`) loads `model.q4k.gguf`, and
+/// `f32` loads `model.safetensors`. An explicit selection never falls back to another file.
+/// On Apple, only `auto` is accepted, since the bundle fixes the weights at export time.
+/// Null on failure; then [`ptts_last_error`] with a null handle reports why.
+///
+/// # Safety
+/// `dir`, `lang` and `quantization` must be NUL-terminated UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ptts_new_with_quant(
+    dir: *const c_char,
+    unit: u32,
+    lang: *const c_char,
+    quantization: *const c_char,
+) -> *mut PttsHandle {
     let dir = unsafe { CStr::from_ptr(dir) }.to_string_lossy().to_string();
     let lang = unsafe { CStr::from_ptr(lang) }.to_string_lossy().to_string();
-    match guarded(|| open(Path::new(&dir), unit, &lang)) {
+    let quantization = unsafe { CStr::from_ptr(quantization) }.to_string_lossy().to_string();
+    match guarded(|| open(Path::new(&dir), unit, &lang, &quantization)) {
         Ok(h) => Box::into_raw(Box::new(h)),
         Err(e) => {
             LAST_ERROR.with(|l| *l.borrow_mut() = Some(c_string(&e)));
@@ -126,7 +156,7 @@ pub unsafe extern "C" fn ptts_new(
 /// `out` then describes the whole utterance. Returns false on failure; see `ptts_last_error`.
 ///
 /// # Safety
-/// `h` must come from `ptts_new`; `text` must be NUL-terminated UTF-8; `cb` must be valid for
+/// `h` must be a live model handle; `text` must be NUL-terminated UTF-8; `cb` must be valid for
 /// the duration of the call; `out` must be writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ptts_speak(
@@ -154,7 +184,7 @@ pub unsafe extern "C" fn ptts_speak(
 /// Voice names, sorted, as one NUL-separated block ending in a second NUL. Borrowed.
 ///
 /// # Safety
-/// `h` must come from `ptts_new`.
+/// `h` must be a live model handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ptts_voices(h: *const PttsHandle) -> *const c_char {
     unsafe { (*h).voice_blob.as_ptr() as *const c_char }
@@ -164,7 +194,7 @@ pub unsafe extern "C" fn ptts_voices(h: *const PttsHandle) -> *const c_char {
 /// as `ptts_voices`. Borrowed.
 ///
 /// # Safety
-/// `h` must come from `ptts_new`.
+/// `h` must be a live model handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ptts_languages(h: *const PttsHandle) -> *const c_char {
     unsafe { (*h).language_blob.as_ptr() as *const c_char }
@@ -173,7 +203,7 @@ pub unsafe extern "C" fn ptts_languages(h: *const PttsHandle) -> *const c_char {
 /// Switch to one of `ptts_voices`. Returns false on failure; see `ptts_last_error`.
 ///
 /// # Safety
-/// `h` must come from `ptts_new`; `name` must be NUL-terminated UTF-8.
+/// `h` must be a live model handle; `name` must be NUL-terminated UTF-8.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ptts_set_voice(h: *mut PttsHandle, name: *const c_char) -> bool {
     let h = unsafe { &mut *h };
@@ -198,7 +228,7 @@ pub unsafe extern "C" fn ptts_set_voice(h: *mut PttsHandle, name: *const c_char)
 /// `ptts_last_error`.
 ///
 /// # Safety
-/// `h` must come from `ptts_new`; `lang` must be NUL-terminated UTF-8.
+/// `h` must be a live model handle; `lang` must be NUL-terminated UTF-8.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ptts_set_language(h: *mut PttsHandle, lang: *const c_char) -> bool {
     let h = unsafe { &mut *h };
@@ -217,7 +247,7 @@ pub unsafe extern "C" fn ptts_set_language(h: *mut PttsHandle, lang: *const c_ch
 /// temperature; see `ptts_last_error`.
 ///
 /// # Safety
-/// `h` must come from `ptts_new`.
+/// `h` must be a live model handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ptts_set_temperature(h: *mut PttsHandle, temperature: f32) -> bool {
     let h = unsafe { &mut *h };
@@ -245,17 +275,17 @@ fn check_temperature(temperature: f32) -> Result<(), String> {
 /// model, the same seed gives the same audio, another seed another take of the same text.
 ///
 /// # Safety
-/// `h` must come from `ptts_new`.
+/// `h` must be a live model handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ptts_set_seed(h: *mut PttsHandle, seed: u64) {
     unsafe { (*h).engine.set_seed(seed) }
 }
 
-/// The last error on `h`, or, when `h` is null, the last `ptts_new` failure on this thread.
+/// The last error on `h`, or, when `h` is null, the last model-constructor failure on this thread.
 /// Borrowed until the next failing call.
 ///
 /// # Safety
-/// `h` must be null or come from `ptts_new`.
+/// `h` must be null or a live model handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ptts_last_error(h: *const PttsHandle) -> *const c_char {
     if h.is_null() {
@@ -266,7 +296,7 @@ pub unsafe extern "C" fn ptts_last_error(h: *const PttsHandle) -> *const c_char 
 }
 
 /// # Safety
-/// `h` must come from `ptts_new` and must not be used afterwards.
+/// `h` must be a model handle and must not be used afterwards.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ptts_free(h: *mut PttsHandle) {
     if !h.is_null() {
